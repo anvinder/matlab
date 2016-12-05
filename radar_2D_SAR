@@ -1,0 +1,132 @@
+function Simulation2D()
+clear
+% INITIALIZATION
+% Main SAR Parameters
+PRF=300; % Pulse Repetition Frequency (Hz)
+dur=3; % Time of Flight (sec), PRF*dur = received echoes
+vp=200; % Velocity of platform
+fo=4.5e9; % Carrier frequency (4.5GHz)
+La=2; % Antenna length actual
+Xc=20000; % Range distance to center of target area
+X0=200; % Half Target Area Width (Target is located within [Xc-
+X0,Xc+X0])
+Tp=.25e-5; % Chirp Pulse Duration
+B0=100e6; % Baseband bandwidth is plus/minus B0\
+target_name='pole1'; %Name of Target Profile Image (GIF Grayscale
+Image)
+%Noise
+noise=0; % Set this flag to add noise to signal
+std_dev=.2; % Standard Deviation of Noise
+% General Variables
+cj=sqrt(-1);
+c=3e8; % Propagation speed
+ic=1/c; % Propagation frequency
+lambda=c/fo; % Wavelength (60cm for fo = 4.5e9)
+eta=linspace(0,dur,PRF*dur)'; % Slow Time Array
+% Range Parameters
+Kr=B0/Tp; % Range Chirp Rate
+dt=1/(2*B0); % Time Domain Sampling Interval
+Ts=(2*(Xc-X0))/c; % Start time of sampling
+Tf=(2*(Xc+X0))/c+Tp; % End time of sampling
+% Azimuth Parameters
+Ka=(2*vp^2)./(lambda*(Xc)); % Linear Azimuth FM rate
+% Measurement Parameters
+rbins=2*ceil((.5*(Tf-Ts))/dt); % Number of time (Range) samples
+t=Ts+(0:rbins-1)*dt; % Time array for data acquisition
+s=zeros(PRF*dur,rbins); % Echoed signal array
+% Target Initialization
+target=imread(target_name,'gif'); %Select Input Target Profile
+[M N]=size(target); ntarget=M*N;
+
+tnum=1; xn=zeros(ntarget,1); yn=xn; Fn=xn; % Target Intialization
+Variables
+for m=1:M
+for n=1:N
+xn(tnum)=(n-N/2);
+yn(tnum)=(M/2-m+1);
+Fn(tnum)=double(target(m,n))/255;
+tnum=tnum+1;
+end
+end
+stretch=3;
+xn=xn*stretch; yn=yn*stretch; %Stretch out Target Profile
+% GENERATE ECHOES
+for j=1:(PRF*dur);
+for i=1:ntarget;
+wa=sinc(La*(atan(vp*(eta(j)-dur/2+yn(i)/vp)/Xc))/lambda).^2;
+R=sqrt((Xc+xn(i))^2+vp^2*((eta(j)-dur/2+yn(i)/vp)^2));
+td=t-2*R/c;
+if noise==1
+s(j,:)=s(j,:)+std_dev*randn(size(s(j,:)))...
++Fn(i)*wa*exp(-cj*(4*pi*fo*ic*R)+cj*pi*Kr*...
+(td.^2-td*Tp)).*(td >= 0 & td <= Tp);
+else
+s(j,:)=s(j,:)+Fn(i)*wa*exp(-cj*(4*pi*fo*ic*R)+cj*pi*Kr*...
+(td.^2-td*Tp)).*(td >= 0 & td <= Tp);
+end
+% if noise==1
+% s(j,:)=s(j,:)+std_dev*randn(size(s(j,:)))...
+% +Fn(i)*wa*exp(-cj*(4*pi*fo*ic*R)+cj*pi*Kr*...
+% (td.^2-td*Tp)).*(0.5*(1-
+cos((2*pi()*td*rbins/Tp)/(rbins-1)))).*(td >= 0 & td <= Tp);
+% else
+% s(j,:)=s(j,:)+Fn(i)*wa*exp(-
+cj*(4*pi*fo*ic*R)+cj*pi*Kr*...
+% (td.^2-td*Tp)).*(0.5*(1-
+cos((2*pi()*td*rbins/Tp)/(rbins-1)))).*(td >= 0 & td <= Tp);
+% end
+end
+if mod(j,50)==0
+display(j/9) % Echo Gen. Percent Complete
+end
+end
+% RANGE DOPLER ALGORITHM (RDA)
+% Range Reference Signal
+td0=t-2*(Xc/c);
+pha20=pi*Kr*((td0.^2)-td0*Tp);
+s0=exp(cj*pha20).*(td0 >= 0 & td0 <= Tp);
+% s0=exp(cj*pha20).*(0.5*(1-cos((2*pi()*td*rbins/Tp)/(rbins-1)))).*(td0
+>= 0 & td0 <= Tp);
+fs0=fty(s0); % Reference Signal in frequency domain
+% Power equalization
+amp_max=1/sqrt(2); % Maximum amplitude for equalization
+afsb0=abs(fs0);
+P_max=max(afsb0);
+
+I=find(afsb0 >= amp_max*P_max);
+fs0(I)=((amp_max*(P_max^2)*ones(1,length(I)))./afsb0(I))...
+.*exp(cj*angle(fs0(I)));
+deltaR=(2*lambda^2*(Xc).*(Ka*(dur*0.5-eta)).^2)/(8*vp^2); % RCM
+cells=round(deltaR/.56); % .56 meters/cell in range direction
+rcm_max=9; %maximum range cell migration
+fs=zeros(PRF*dur,rbins); fsm=fs; fsmb=fs; smb=fs; fsac=fs; sac=fs;
+% Range Compression
+for k=1:(PRF*dur);
+fs(k,:)=fty(s(k,:)); % Range FFT
+fsm(k,:)=fs(k,:).*conj(fs0);% Range Matched Filtering
+smb(k,:)=ifty(fsm(k,:)); % Range IFFT
+end;
+% Azimuth Reference Signal
+smb0=exp(cj*pi*Ka.*eta.*(2*eta(PRF*dur/2+1)-eta));
+fsmb0=ftx(smb0); % Azimuth Matched Filter Spectrum
+for l=1:rbins;
+fsmb(:,l)=ftx(smb(:,l)); % Azimuth FFT
+end;
+% Range Cell Migration Correction (RCMC)
+fsmb2=fsmb;
+for k=1:dur*PRF;
+for m=1:rbins-rcm_max
+fsmb2(k,m)=fsmb(k,m+cells(k));
+end
+end;
+for l=1:rbins;
+fsac(:,l)=iftx(fsmb2(:,l)); % Azimuth IFFT
+end;
+% Azimuth Compression
+for l=1:rbins;
+fsac(:,l)=fsmb2(:,l).*conj(fsmb0); % Azimuth Matched Filtering
+sac(:,l)=iftx(fsac(:,l)); % Azimuth IFFT / Final Target Image
+end;
+% Plot Final Results
+figure(1), imagesc(abs(sac))
+xlabel('Range, samples'), ylabel('Azimuth, samples')
